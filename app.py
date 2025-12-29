@@ -9,11 +9,11 @@ import mediapipe as mp
 
 app = FastAPI()
 
-# 获取当前文件所在目录
+# 1. 确保目录结构正确
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# 必须使用 static 目录，Bubble 才能访问到处理后的视频
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
+if not os.path.exists(STATIC_DIR):
+    os.makedirs(STATIC_DIR, exist_ok=True)
 
 # 挂载静态文件目录
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -40,9 +40,14 @@ def get_feedback(phase_scores):
             if phase == "propulsion": feedback_list.append("蹬腿要完全蹬直并拢。")
     return " ".join(feedback_list) if feedback_list else "动作非常标准！"
 
+@app.get("/")
+async def root():
+    return {"status": "Server is running"}
+
 @app.post("/analyze")
 async def analyze_video(file: UploadFile = File(...)):
-    raw_path = os.path.join(STATIC_DIR, file.filename)
+    # 使用安全的存储路径
+    raw_path = os.path.join(STATIC_DIR, f"raw_{file.filename}")
     processed_filename = f"out_{file.filename}"
     processed_path = os.path.join(STATIC_DIR, processed_filename)
     
@@ -50,56 +55,64 @@ async def analyze_video(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(static_image_mode=False)
+    # 显式关闭图形界面支持，防止服务器崩溃
+    pose = mp_pose.Pose(static_image_mode=False, model_complexity=1)
     cap = cv2.VideoCapture(raw_path)
     
-    # 设置视频写入
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # 获取视频属性
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # 核心修改：使用 'avc1' (H.264) 确保视频能在网页播放
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out = cv2.VideoWriter(processed_path, fourcc, fps, (w, h))
 
     data = {"recovery": {"knee": []}, "outsweep": {"knee": []}, "propulsion": {"knee": []}}
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret: break
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = pose.process(rgb)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
 
-        if res.pose_landmarks:
-            lm = res.pose_landmarks.landmark
-            # 获取右腿关键点
-            hip = [lm[mp_pose.PoseLandmark.RIGHT_HIP].x, lm[mp_pose.PoseLandmark.RIGHT_HIP].y]
-            knee = [lm[mp_pose.PoseLandmark.RIGHT_KNEE].x, lm[mp_pose.PoseLandmark.RIGHT_KNEE].y]
-            ankle = [lm[mp_pose.PoseLandmark.RIGHT_ANKLE].x, lm[mp_pose.PoseLandmark.RIGHT_ANKLE].y]
+            if res.pose_landmarks:
+                lm = res.pose_landmarks.landmark
+                # 获取右腿关键点
+                hip = [lm[mp_pose.PoseLandmark.RIGHT_HIP].x, lm[mp_pose.PoseLandmark.RIGHT_HIP].y]
+                knee = [lm[mp_pose.PoseLandmark.RIGHT_KNEE].x, lm[mp_pose.PoseLandmark.RIGHT_KNEE].y]
+                ankle = [lm[mp_pose.PoseLandmark.RIGHT_ANKLE].x, lm[mp_pose.PoseLandmark.RIGHT_ANKLE].y]
 
-            angle = calc_angle(hip, knee, ankle)
-            phase = classify_phase(angle)
-            data[phase]["knee"].append(angle)
+                angle = calc_angle(hip, knee, ankle)
+                phase = classify_phase(angle)
+                data[phase]["knee"].append(angle)
 
-            # 在视频上画线
-            p1 = (int(hip[0]*w), int(hip[1]*h))
-            p2 = (int(knee[0]*w), int(knee[1]*h))
-            p3 = (int(ankle[0]*w), int(ankle[1]*h))
-            cv2.line(frame, p1, p2, (0, 255, 0), 5)
-            cv2.line(frame, p2, p3, (0, 255, 0), 5)
-            cv2.putText(frame, str(int(angle)), p2, cv2.FONT_HERSHEY_SIMPLEX, 2, (0,0,255), 3)
+                # 在视频上画线（带半透明效果）
+                p1 = (int(hip[0]*w), int(hip[1]*h))
+                p2 = (int(knee[0]*w), int(knee[1]*h))
+                p3 = (int(ankle[0]*w), int(ankle[1]*h))
+                cv2.line(frame, p1, p2, (0, 255, 0), 3)
+                cv2.line(frame, p2, p3, (0, 255, 0), 3)
+                cv2.putText(frame, str(int(angle)), (p2[0]+10, p2[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
 
-        out.write(frame)
-
-    cap.release()
-    out.release()
+            out.write(frame)
+    finally:
+        cap.release()
+        out.release()
+        # 清理原始视频节省空间
+        if os.path.exists(raw_path):
+            os.remove(raw_path)
 
     phase_scores = {p: round(max(0, 100 - abs(sum(d["knee"])/len(d["knee"]) - IDEAL_KNEE[p])), 2) 
                     for p, d in data.items() if d["knee"]}
     
     total_score = round(sum(phase_scores.values()) / len(phase_scores), 2) if phase_scores else 0
 
-    # 动态生成 Render 上的视频地址
-    render_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost:8000')}/static/{processed_filename}"
+    # 动态获取 Render 的域名
+    host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost:8000')
+    render_url = f"https://{host}/static/{processed_filename}"
 
     return {
         "total_score": total_score,
@@ -109,4 +122,5 @@ async def analyze_video(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

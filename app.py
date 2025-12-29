@@ -3,7 +3,9 @@ import shutil
 import os
 import cv2
 import numpy as np
-import mediapipe as mp
+
+# ✅ 关键修复：不要用 mp.solutions
+from mediapipe.python.solutions import pose as mp_pose
 
 app = FastAPI()
 
@@ -50,7 +52,6 @@ async def analyze_video(file: UploadFile = File(...)):
     with open(video_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    mp_pose = mp.solutions.pose
     pose = mp_pose.Pose(static_image_mode=False)
     cap = cv2.VideoCapture(video_path)
 
@@ -70,11 +71,13 @@ async def analyze_video(file: UploadFile = File(...)):
 
         if res.pose_landmarks:
             lm = res.pose_landmarks.landmark
-            mp_lm = mp_pose.PoseLandmark
 
-            hip = [lm[mp_lm.RIGHT_HIP].x, lm[mp_lm.RIGHT_HIP].y]
-            knee = [lm[mp_lm.RIGHT_KNEE].x, lm[mp_lm.RIGHT_KNEE].y]
-            ankle = [lm[mp_lm.RIGHT_ANKLE].x, lm[mp_lm.RIGHT_ANKLE].y]
+            hip = [lm[mp_pose.PoseLandmark.RIGHT_HIP].x,
+                   lm[mp_pose.PoseLandmark.RIGHT_HIP].y]
+            knee = [lm[mp_pose.PoseLandmark.RIGHT_KNEE].x,
+                    lm[mp_pose.PoseLandmark.RIGHT_KNEE].y]
+            ankle = [lm[mp_pose.PoseLandmark.RIGHT_ANKLE].x,
+                     lm[mp_pose.PoseLandmark.RIGHT_ANKLE].y]
 
             knee_angle = calc_angle(hip, knee, ankle)
             phase = classify_phase(knee_angle)

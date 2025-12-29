@@ -3,10 +3,9 @@ import shutil
 import os
 import cv2
 import numpy as np
-import mediapipe as mp
 
-# 修正导入方式，适配不同版本
-mp_pose = mp.solutions.pose 
+# ✅ 关键修复：不要用 mp.solutions
+from mediapipe.python.solutions import pose as mp_pose
 
 app = FastAPI()
 
@@ -115,5 +114,4 @@ if __name__ == "__main__":
         "app:app",
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 8000))
-
     )
